@@ -1,45 +1,70 @@
 # Write Path Diagram through ggplot.
-library(ggnetwork);library(tidyverse)
+library(ggnetwork);library(tidyverse);library(lavaan);library(broom)
+
+
+# 
+# The Holzinger and Swineford (1939) example
+HS.model <- ' visual  =~ x1 + x2 + x3
+              textual =~ x4 + x5 + x6
+              speed   =~ x7 + x8 + x9 '
+
+fit <- lavaan(HS.model, data=HolzingerSwineford1939,
+              auto.var=TRUE, auto.fix.first=TRUE,
+              auto.cov.lv.x=TRUE)
+summary(fit, fit.measures=TRUE)
+para <- tidy(fit)
 
 # Detect coordinates of nodes.
 # Check model structure
-operator <- fit_CLGM %>% 
-  parameterEstimates %>% as_tibble %>% view %>%  
+operator <- para %>% 
   distinct(op) %>% pull
 
-operator %in% "=~" %>% any # Check if model has latent structure.
-operator %in% "~" %>% any # Check if model has stracture equation.
-operator %in% "~~" %>% any # Check if model has VCOV assumption between variables.
-operator %>% str_detect("~[0-9]") %>% any # Check if model impose any constrain on any valiable.
-
-fit_CLGM %>% 
-  parameterEstimates %>% as_tibble %>% view
-# distinct(lhs, op, rhs)
+LATENT <- operator %in% "=~" %>% any # Check if model has latent structure.
+REGRESSION <- operator %in% "~" %>% any # Check if model has stracture equation.
+VCOV <- operator %in% "~~" %>% any # Check if model has VCOV assumption between variables.
+CONSTRAIN <- operator %>% str_detect("~[0-9]") %>% any # Check if model impose any constrain on any valiable.
 
 # Confirm the number of variables in each type.
-ov_name <- fit_CLGM@pta$vnames$ov %>% .[[1]] %>% 
-  str_remove_all(fit_CLGM@pta$vnames$eqs.x %>% .[[1]])
-lv_name <- fit_CLGM@pta$vnames$lv %>% .[[1]]
-eqs_y_name <- fit_CLGM@pta$vnames$eqs.y %>% .[[1]]
-eqs_x_name <- fit_CLGM@pta$vnames$eqs.x %>% .[[1]]
+ov_name <- fit@pta$vnames$ov %>% pluck(1)
+eqs_y_name <- fit@pta$vnames$eqs.y %>% pluck(1)
+eqs_x_name <- fit@pta$vnames$eqs.x %>% pluck(1)
+if(!is.null(eqs_x_name))
+  ov_name <- ov_name %>% str_remove_all(eqs_x_name)
+lv_name <- fit@pta$vnames$lv %>% pluck(1)
+
+# Model structure detection
+STRUCTURE <- list(ov_name, lv_name, eqs_x_name, eqs_y_name) %>% 
+  map_chr(~ is_null(.x) %>% ifelse("F", "T")) %>% 
+  str_c(collapse = "")
+SEM <- case_when(STRUCTURE, 
+                 "TTFF" ~ "FACTOR ANALYSIS MODEL", 
+                 "TFFF" ~ "OBSERVED REGRESSION MODEL",
+                 "TTTT" ~ "MEASURE & STRUCTURE EQUATION MODEL"
+                 )
 
 # ov
-ov_y <- seq(0, 1, 
-            by = 1/ (length(fit_CLGM@pta$vnames$ov %>% .[[1]]) - length(fit_CLGM@pta$vnames$eqs.x %>% .[[1]]) + 1) ) %>% 
-  .[-1] %>% .[-length(.)]
-lv_y <- seq(0, 1, by = 1/ (length(fit_CLGM@pta$vnames$lv %>% .[[1]])+1) ) %>% .[-1] %>% .[-length(.)]# blank space
-if(length(fit_CLGM@pta$vnames$eqs.x %>% .[[1]]) != 0){
+n_ov <- length(ov_name)
+n_lv <- length(lv_name)
+n_eqx <- length(eqs_x_name)
+n_eqy <- length(eqs_y_name)
+
+spacer <- function(x) x[-c(1, length(x))]
+
+# y axis lovation
+ov_y <- seq(0, 1, by = 1/ (n_ov - n_eqx + 1) ) %>% spacer # blank space
+lv_y <- seq(0, 1, by = 1/ (n_lv+1) ) %>% spacer # blank space
+if(n_eqx != 0){
   ov_x <- 0.2
   lv_x <- 0.7
 } else {
   ov_x <- 0.0
   lv_x <- 0.5
   eqs_x_x <- 1.0
-  eqs_x_y <- seq(0, 1, by = 1/(length(fit_CLGM@pta$vnames$eqs.x %>% .[[1]])+1) ) %>% .[-1] %>% .[-length(.)] # blank spase
+  eqs_x_y <- seq(0, 1, by = 1/(n_eqx+1) ) %>% spacer # blank spase
 }
 
 node_coord <- 
-  fit_CLGM %>% 
+  fit %>% 
   parameterEstimates %>% as_tibble %>% 
   distinct(lhs) %>%
   mutate(n_x = 0, n_y = 0)
@@ -56,10 +81,9 @@ node_coord <- node_coord %>% mutate(n_xend = n_x, n_yend = n_y)
 
 
 # Create Edges
-edge_coord <- fit_CLGM %>% 
+edge_coord <- fit %>% 
   parameterEstimates %>% as_tibble %>% 
-  filter(op %in% c("=~", "~")) %>%  # two direction edges.
-  select(lhs, op, rhs, est)
+  select(lhs, op, rhs, est, se, pvalue)
 
 node_edge_coord <- node_coord %>% 
   bind_rows(
@@ -79,14 +103,14 @@ node_edge_coord <- node_coord %>%
     run  = e_x - e_xend,
     dist = sqrt(run^2 + rise^2) %>% round(2), 
     e_xend = case_when(lhs %in% lv_name ~ (e_x + .9 *(e_xend - e_x)),
-                       lhs %in% ov_name ~ (e_x + .75*(e_xend - e_x)),
+                       lhs %in% ov_name ~ (e_x + .9*(e_xend - e_x)),
                        lhs %in% eqs_x_name ~ (e_x + .9*(e_xend - e_x))
     ), 
     e_yend = case_when(lhs %in% lv_name ~ (e_y + .9 *(e_yend - e_y)),
-                       lhs %in% ov_name ~ (e_y + .85*(e_yend - e_y)),
+                       lhs %in% ov_name ~ (e_y + .9*(e_yend - e_y)),
                        lhs %in% eqs_x_name ~ (e_y + .9*(e_yend - e_y))
     )
-  ) %>% view
+  ) 
 
 full_join(node_coord, edge_coord) %>% view
 
@@ -108,7 +132,7 @@ node_edge_coord %>%
 # Re try
 
 lav_para_tbl <- 
-  fit_CLGM %>% 
+  fit %>% 
   parameterEstimates %>% as_tibble# %>% view
 # distinct(lhs, op, rhs)
 lav_para_tbl %>% 
@@ -118,23 +142,23 @@ lav_para_tbl %>%
                              op == "~1" ~ "meanstructure"))
 
 # Confirm the number of variables in each type.
-ov_name <- fit_CLGM@pta$vnames$ov %>% .[[1]] %>% 
-  str_remove_all(fit_CLGM@pta$vnames$eqs.x %>% .[[1]])
-lv_name <- fit_CLGM@pta$vnames$lv %>% .[[1]]
-eqs_y_name <- fit_CLGM@pta$vnames$eqs.y %>% .[[1]]
-eqs_x_name <- fit_CLGM@pta$vnames$eqs.x %>% .[[1]]
+ov_name <- fit@pta$vnames$ov %>% .[[1]] %>% 
+  str_remove_all(fit@pta$vnames$eqs.x %>% .[[1]])
+lv_name <- fit@pta$vnames$lv %>% .[[1]]
+eqs_y_name <- fit@pta$vnames$eqs.y %>% .[[1]]
+eqs_x_name <- fit@pta$vnames$eqs.x %>% .[[1]]
 
 # ov
 ov_y <- seq(0, 1, 
-            by = 1/ (length(fit_CLGM@pta$vnames$ov %>% .[[1]]) - length(fit_CLGM@pta$vnames$eqs.x %>% .[[1]]) + 1) ) %>% 
+            by = 1/ (length(fit@pta$vnames$ov %>% .[[1]]) - length(fit@pta$vnames$eqs.x %>% .[[1]]) + 1) ) %>% 
   .[-1] %>% .[-length(.)]
-lv_y <- seq(0, 1, by = 1/ (length(fit_CLGM@pta$vnames$lv %>% .[[1]])+1) ) %>% .[-1] %>% .[-length(.)]# blank space
-if(length(fit_CLGM@pta$vnames$eqs.x %>% .[[1]]) != 0){
+lv_y <- seq(0, 1, by = 1/ (length(fit@pta$vnames$lv %>% .[[1]])+1) ) %>% .[-1] %>% .[-length(.)]# blank space
+if(length(fit@pta$vnames$eqs.x %>% .[[1]]) != 0){
   ov_x <- 0.2
   lv_x <- 0.7
 } else {
   ov_x <- 0.0
   lv_x <- 0.5
   eqs_x_x <- 1.0
-  eqs_x_y <- seq(0, 1, by = 1/(length(fit_CLGM@pta$vnames$eqs.x %>% .[[1]])+1) ) %>% .[-1] %>% .[-length(.)] # blank spase
+  eqs_x_y <- seq(0, 1, by = 1/(length(fit@pta$vnames$eqs.x %>% .[[1]])+1) ) %>% .[-1] %>% .[-length(.)] # blank spase
 }
